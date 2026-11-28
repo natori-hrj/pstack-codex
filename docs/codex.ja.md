@@ -20,7 +20,7 @@ CLI 0.172.0 のヘルプには管理 worktree 用の `--worktree` もありま�
 
 ## 検証と測定
 
-`python3 tests/validate.py` は全オフライン検証を実行します。`--suite common` は Codex 不要で、スキル一覧、Git、共通ワークフローを確認します。`--suite codex` はマニフェストとモデル TOML、ネイティブの検出・設定、Codex プロトコルの fixture を確認します。並行ワーカーは決定的な Git fixture であり、実際のエージェントの権限境界を検証するものではありません。
+`go test -mod=vendor ./...` はスキル一覧、マニフェスト、TOML、インストール、Git と配信、Codex プロトコルの fixture を確認します。Git fixture ではチェックアウトの動作を検証します。実 Codex CLI 0.172.0 で探索・設定・サンドボックス・キャンセルを認証なしで確認するには `NSTACK_CODEX_NATIVE_TEST=offline go test -mod=vendor -v ./internal/codex -run '^TestNativeOffline'` を使います。別の `NSTACK_CODEX_NATIVE_TEST=oauth go test -mod=vendor -v ./internal/codex -run '^TestNativeOAuth$'` は既存 OAuth アカウントの利用許可を得てから実行し、使い捨てデータで Sol と Astra の応答を確認します。
 
 ライブでは CLI の明示的な `-m` で3モデルそれぞれが応答を完了しました。これは要求したモデル名で CLI リクエストが成功した証拠です。バックエンドの実体を独立に識別する証拠はありません。リリース前の追加検証では、ユーザー用 agents ディレクトリからネイティブのロール名を指定し、Sol と Astra の応答とセッション記録のモデル名を確認しました。Daybreak Blue は、一時環境でプログラムを指定しなかったときに `access_programs.cyber=daybreak_blue` を要求されました。認証済みの Codex の `model/list` で対象モデルの `availableAccessPrograms.cyber` に `daybreakBlue` があることを確認し、CLI 0.172.0 の `--cyber-access-program daybreak_blue` を指定した読み取り専用セッションで、ネイティブの `pstack_security` がモデル上書きなしで応答することを確認しました。アクセスプログラムの選択は利用権限を付与しません。権限が確認できない場合はそのロールの作業を止めます。
 
@@ -42,9 +42,7 @@ CLI 0.172.0 のヘルプには管理 worktree 用の `--worktree` もありま�
 
 ## 起動前のロール確認
 
-単体バイナリでは `nstack check-role <導入済みロール.toml> < model-list.json` を使います。自動レビューでは、下記の例と同じ引数を `nstack review` に渡し、ゲートコマンドの前に `--` を置きます。下記の Python コマンドは参照実装を使う場合の手順です。PyYAML は Python の配布検証に必要ですが、Go バイナリには不要です。利用者が指定するゲートには、そのゲート自身の実行環境が必要です。
-
-導入した TOML と、対象スコープでの検出を確認します。同じアカウントとクライアントの app-server で `includeHidden: true` を付けて `model/list` を取得し、全ページを `{"data": [...]}` にまとめます。`python3 adapters/codex/check_role.py <導入済みロール.toml> < model-list.json` を実行します。モデルが継承設定なら実セッションで解決し、`--inherited-model` と、該当する場合は `--inherited-effort` に渡します。モデル一覧は公示されたアクセスの証拠です。ライブゲートが必要な場合は、応答完了を別途記録します。
+導入した TOML と、対象スコープでの検出を確認します。同じアカウントとクライアントの app-server で `includeHidden: true` を付けて `model/list` を取得し、全ページを `{"data": [...]}` にまとめます。`nstack check-role <導入済みロール.toml> < model-list.json` を実行します。モデルが継承設定なら実セッションで解決し、`--inherited-model` と、該当する場合は `--inherited-effort` に渡します。モデル一覧は公示されたアクセスの証拠です。ライブゲートが必要な場合は、応答完了を別途記録します。
 
 `adapters/codex/optional/nstack_security_daybreak.toml` は利用する場合に agents ディレクトリへ配置します。許可された防御作業に明示的に選択し、事前確認に `--daybreak-selected` を付けます。`availableAccessPrograms.cyber` に `daybreakBlue` があることを確認します。クライアントが要求する場合は、そのセッションに `--cyber-access-program daybreak_blue` を指定します。グローバル既定は無効のままにします。ロール、モデル、アクセスが不足している場合は起動を停止し、理由を報告します。モデルの代替には明示的な選択が必要です。
 
@@ -52,29 +50,25 @@ CLI 0.172.0 のヘルプには管理 worktree 用の `--worktree` もありま�
 
 ネイティブサブエージェントは、設定済みモデルの選択と親への結果返却に対応します。実効サンドボックスと承認設定は親から継承します。親が読み取り専用ならこの方式を利用できます。書き込み可能な実装用の親では、レビューだけの読み取り専用を強制できないため、ホスト用コマンドはライターと各レビューを別のネイティブ app-server プロセスと一時スレッドで起動します。
 
-Python 3.11 以降、Git、Codex CLI 0.172.0 があり、Codex 認証済みの許可されたホストで一度実行します。専用のクリーンなフィーチャーチェックアウトと、観測できる受け入れ条件を含む依頼ファイルを使います。ホストは Codex の実行時状態を書き込め、通常のサンドボックスを起動できる必要があります。通常の Codex ホームと認証ストアを使います。チェックアウトごとに実効 MCP 設定を読み、Codex の `-c` で子プロセスにだけ上書きを適用し、起動前にすべての MCP サーバーが無効だと確認します。ユーザーやプロジェクトの設定ファイルは保持されます。子プロセスではアプリ、プラグイン、フック、メモリ、Web 検索、ネイティブ委任を無効にします。サンドボックスは書き込みとネットワークを制限します。ファイルの読み取りまで分離する必要がある場合は、制限された専用ホストアカウントを使ってください。
+Git、Codex CLI 0.172.0、既存の ChatGPT OAuth ログインがある許可されたホストで `nstack review` を実行します。専用のクリーンなフィーチャーチェックアウトと、観測できる受け入れ条件を含む依頼ファイルを使います。ホストは Codex の実行時状態を書き込め、通常のサンドボックスを起動できる必要があります。通常の Codex ホームと認証ストアを使います。チェックアウトごとに実効 MCP 設定を読み、Codex の `-c` で子プロセスにだけ上書きを適用し、起動前にすべての MCP サーバーが無効だと確認します。ユーザーやプロジェクトの設定ファイルは保持されます。子プロセスではアプリ、プラグイン、フック、メモリ、Web 検索、ネイティブ委任を無効にします。サンドボックスは書き込みとネットワークを制限します。ファイルの読み取りまで分離する必要がある場合は、制限された専用ホストアカウントを使ってください。
+
+ネイティブレビューには Linux の pidfd（Linux 5.4 以降の `waitid(P_PIDFD)` を含む）、subreaper、および現在の PID 名前空間と各スレッドの `children` ファイルが見える procfs が必要です。`CODEX_EXEC_SERVER_URL` は設定せず、Codex の実行をローカルの管理対象プロセスツリー内に置きます。監視プロセスは子孫の停止・回収を確認してから終了を通知します。必要な機能や終了確認が得られない場合、ワークフローは失敗します。エラーは `status.json`、監視プロセスが出力した診断は該当段階の `.stderr` を確認してください。root 権限や cgroup の委任は不要です。
 
 ```sh
-python3 adapters/codex/review.py --authorize-host \
+nstack review --authorize-host \
   --work-ref refs/heads/nstack-work-example \
   --repo /path/to/feature-checkout --base <基点SHA> \
   --brief /path/to/acceptance.md --evidence /path/to/new-private-directory \
   --implement-model gpt-6.2-sol --implement-effort medium \
   --review-model gpt-6.2-astra --review-effort medium \
-  -- python3 tests/validate.py
+  -- /bin/sh -c 'GOCACHE="$TMPDIR/go-cache" GOTOOLCHAIN=local go test -mod=vendor ./...'
 ```
 
 既存コミットだけを検証する場合は `--review-only` を使います。書き込みを許可する場合は、まだ存在しないローカル ref を `--work-ref refs/heads/<work>` で指定します。必要になった時点で作業ブランチを作成し、元の ref は保持します。納品を許可する場合は `--push <remote> --delivery-ref refs/heads/<feature>` を指定します。作業 ref と配信 ref は別にします。既存 PR のみを更新するには `--github-repo <owner/repo> --pr-base <branch> --pr-number <number>` を指定します。PR の確認・作成を許可する場合は番号の代わりに `--pr-title <title>` を使います。
 
 事前確認では、実効設定、認証、モデルと推論強度の提示、各スレッドの設定、レビュー時の実際の書き込み拒否、ゲート用の専用一時領域への書き込みを検証します。プロンプト送信前に実効スレッド設定を比較し、モデルが切り替わった場合は停止します。各候補のゲートは専用の一時領域を持つクリーンなチェックアウトで実行します。レビューは別のチェックアウトとコンテキストで開始し、判定に完全な候補 SHA を要求します。実証された指摘の修正は最大2巡です。ゲート失敗、証跡不足、レビュー保留、指摘の再発、認証・権限エラーでは納品を止めます。候補別のゲート出力、モデルとサンドボックス設定、スレッド・ターン ID、構造化判定、取得できた使用量、納品状態を証跡ディレクトリに記録します。リポジトリの内容を含む場合があるため Git の管理外に置きます。
 
-納品時は Git の実効 push 先を1つに確定し、remote HEAD を検証できない場合は停止します。PR の差分は、レビュー対象の基点と候補 SHA に一致する必要があります。基点のブランチがローカルにない場合は、実行前に取得してください。レビュー専用モードで修正を求められた場合は非ゼロで終了し、`status.json` に `changes_requested` を記録します。配布物全体の検証では、スキルのフロントマターの確認に PyYAML も必要です。
-
-### Go ホストアダプター
-
-このチェックアウトから[単体 nstack バイナリ](../README.ja.md#単体-go-バイナリ)をビルドできます（Go 1.25 以降、Linux）。レビューには Codex CLI 0.172.0 と既存の ChatGPT OAuth ログインが必要です。`nstack review` には上記と同じ引数を渡し、ゲートコマンドの前には `--` を指定します。`nstack check-role <導入済みロール.toml> < model-list.json` は Python 版と同じ入力でロールの公示情報を検証します。既存の `nstack-codex` というバイナリ名でも引数は同じです。
-
-`python3 -B tests/go_compatibility.py` は認証なしで共通ワークフロー、ロール、app-server の fixture を実行します。`NSTACK_CODEX_NATIVE_TEST=offline go test -v ./internal/codex -run '^TestNativeOffline'` は実 Codex を認証なしで検証します。別の `NSTACK_CODEX_NATIVE_TEST=oauth go test -v ./internal/codex -run '^TestNativeOAuth$'` は既存 OAuth アカウントの利用許可を得てから実行し、使い捨てデータで Sol と Astra の応答を確認します。
+納品時は Git の実効 push 先を1つに確定し、remote HEAD を検証できない場合は停止します。PR の差分は、レビュー対象の基点と候補 SHA に一致する必要があります。基点のブランチがローカルにない場合は、実行前に取得してください。レビュー専用モードで修正を求められた場合は非ゼロで終了し、`status.json` に `changes_requested` を記録します。ゲートコマンドの直前には `--` を置き、ゲートが使うツールを用意します。既存の Go バイナリ名 `nstack-codex` でも引数は同じです。
 
 TOML パーサーを同梱しています。[MIT ライセンス通知](../vendor/github.com/BurntSushi/toml/COPYING)も参照してください。
 

@@ -13,14 +13,14 @@ import (
 // Use the published asset locations rather than embedding the checkout.
 //
 //go:embed skills/*/SKILL.md skills/*/agents/openai.yaml skills/natori-mode/playbooks/*.md
-//go:embed adapters/*.py adapters/codex/*.py adapters/codex/optional/*.toml
+//go:embed adapters/codex/optional/*.toml
 //go:embed docs/*.md docs/releases/*.md examples/agents/*.toml
 //go:embed LICENSE LICENSE-upstream README.md README.ja.md .codex-plugin/plugin.json
 var content embed.FS
 
 const manifest = ".codex-plugin/plugin.json"
 
-// Snapshot is the exact payload that the reference installer copies.
+// Snapshot is the published installer payload and embedded asset identity.
 type Snapshot struct {
 	Files    map[string][]byte
 	Version  string

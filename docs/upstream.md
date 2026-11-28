@@ -23,4 +23,4 @@ The root license for the pstack portions of all five ports is MIT. bemoat also c
 1. Compare the recorded revision with the new upstream SHA, including pstack, the generator, manifests, and licenses.
 2. Copy relevant updates to adopted principles from the same relative paths. Apply workflow changes only to the affected Codex skills.
 3. Inspect any new commands or external connections for permissions, destinations, and licensing.
-4. Update the provenance and notices, run `python3 tests/validate.py`, and smoke-test only the affected behavior.
+4. Update the provenance and notices, run `go test -mod=vendor ./...`, and smoke-test the affected behavior.

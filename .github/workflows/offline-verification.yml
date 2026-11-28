@@ -16,75 +16,60 @@ env:
 jobs:
   common:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ env.CANDIDATE_SHA }}
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.14"
-      - name: Verify exact candidate with no harness on PATH
-        shell: bash
-        run: |
-          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          isolated="$(mktemp -d "$RUNNER_TEMP/nstack-common.XXXXXX")"
-          mkdir "$isolated/bin" "$isolated/home" "$isolated/tmp"
-          for command in git python3; do
-            ln -s "$(command -v "$command")" "$isolated/bin/$command"
-          done
-          env -i HOME="$isolated/home" PATH="$isolated/bin" TMPDIR="$isolated/tmp" \
-            GIT_CONFIG_NOSYSTEM=1 PYTHONUTF8=1 \
-            "$isolated/bin/python3" -B tests/validate.py --suite common
+          fetch-depth: 0 # Archived snapshots from the released v0.3.0 and v0.4.0 trees.
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: "1.27.4"
           cache: false
-      - name: Verify Go and Python compatibility without a harness
+      - name: Verify exact candidate with only Go, Git and race toolchain on PATH
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           goroot="$(go env GOROOT)"
           isolated="$(mktemp -d "$RUNNER_TEMP/nstack-go.XXXXXX")"
           mkdir "$isolated/bin" "$isolated/home" "$isolated/tmp" "$isolated/cache"
-          for command in git python3 gcc as ld; do
+          for command in git gcc as ld cat mkdir; do
             ln -s "$(command -v "$command")" "$isolated/bin/$command"
           done
           offline() {
             env -i HOME="$isolated/home" PATH="$goroot/bin:$isolated/bin" TMPDIR="$isolated/tmp" \
               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=file \
-              PYTHONUTF8=1 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOCACHE="$isolated/cache" \
+              GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOCACHE="$isolated/cache" \
               CGO_ENABLED=1 CC=gcc "$@"
           }
           offline go version
-          unformatted="$(offline gofmt -l distribution.go distribution_test.go cmd internal tests/fixtures/go-review)"
+          unformatted="$(offline gofmt -l distribution.go distribution_test.go cmd internal)"
           if [ -n "$unformatted" ]; then
             printf 'Files requiring gofmt:\n%s\n' "$unformatted" >&2
             exit 1
           fi
-          offline go vet ./...
-          offline go test ./...
+          offline go vet -mod=vendor ./...
+          offline go test -mod=vendor ./...
           # ubuntu-24.04 uses Linux amd64 here and has the C toolchain for -race.
-          offline go test -race ./...
-          offline python3 -B tests/go_compatibility.py
+          offline go test -mod=vendor -race ./...
       - name: Verify reproducible Linux distribution and Python-free runtime
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           goroot="$(go env GOROOT)"
           work="$(mktemp -d "$RUNNER_TEMP/nstack-dist.XXXXXX")"
-          mkdir "$work/home" "$work/cache" "$work/source" "$work/tmp"
+          mkdir "$work/home" "$work/cache-first" "$work/cache-rebuild" "$work/source" "$work/tmp"
           git archive "$CANDIDATE_SHA" | tar -xf - -C "$work/source"
           build() {
             env -i HOME="$work/home" PATH="$goroot/bin" TMPDIR="$work/tmp" \
-              GOCACHE="$work/cache" GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
+              GOCACHE="$3" GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
               CGO_ENABLED=0 GOOS=linux GOARCH="$1" GOAMD64=v1 GOARM64=v8.0 \
               "$goroot/bin/go" build -mod=vendor -trimpath -buildvcs=false -o "$2" ./cmd/nstack-codex
           }
           for arch in amd64 arm64; do
-            build "$arch" "$work/nstack-linux-$arch"
-            (cd "$work/source"; build "$arch" "$work/rebuilt-$arch")
+            build "$arch" "$work/nstack-linux-$arch" "$work/cache-first"
+            (cd "$work/source"; build "$arch" "$work/rebuilt-$arch" "$work/cache-rebuild")
             cmp "$work/nstack-linux-$arch" "$work/rebuilt-$arch"
           done
           (cd "$work"; sha256sum nstack-linux-amd64 nstack-linux-arm64 > SHA256SUMS; sha256sum -c SHA256SUMS)
@@ -109,6 +94,34 @@ jobs:
           test "$(readlink "$work/home/skills/nstack-managed")" = "$work/home/nstack/snapshots/first/skills"
           printf '%s\n' '{"data":[{"model":"gpt-6.2-astra","supportedReasoningEfforts":[{"reasoningEffort":"medium"}]}]}' |
             nstack check-role "$work/home/nstack/snapshots/first/examples/agents/nstack_review.toml"
+          # Rebuild the pinned v0.4.0 installer and reconstruct the exact
+          # v0.3.0 payload layout from its release, without invoking Python.
+          mkdir "$work/previous" "$work/home/nstack/snapshots/v030"
+          git archive 97fc046dc784c3e4586ec13795cf2dedd9397315 | tar -xf - -C "$work/previous"
+          git archive bb8206a95bffb8908d75be8538e3e106bf280266 -- \
+            skills adapters docs examples/agents LICENSE LICENSE-upstream README.md README.ja.md |
+            tar -xf - -C "$work/home/nstack/snapshots/v030"
+          (cd "$work/previous"; build amd64 "$work/nstack-v040" "$work/cache-first")
+          previous() { env -i PATH= HOME="$work/home" "$work/nstack-v040" "$@"; }
+          previous install --home "$work/home" stage v040
+          previous install --home "$work/home" activate v040
+          nstack install --home "$work/home" activate second
+          nstack install --home "$work/home" activate v040
+          test "$(readlink "$work/home/skills/nstack-managed")" = "$work/home/nstack/snapshots/v040/skills"
+          nstack install --home "$work/home" activate v030
+          nstack install --home "$work/home" activate second
+          nstack install --home "$work/home" activate v030
+          test "$(readlink "$work/home/skills/nstack-managed")" = "$work/home/nstack/snapshots/v030/skills"
+          previous install --harness opencode --home "$work/opencode" stage v040
+          previous install --harness opencode --home "$work/opencode" activate v040
+          nstack install --harness opencode --home "$work/opencode" activate second
+          nstack install --harness opencode --home "$work/opencode" activate v040
+          test "$(readlink "$work/opencode/skills/nstack-managed")" = "$work/opencode/nstack/snapshots/v040/skills"
+          test "$(readlink "$work/home/skills/nstack-managed")" = "$work/home/nstack/snapshots/v030/skills"
+          if find "$work/home/nstack/snapshots/second" "$work/opencode/nstack/snapshots/second" -name '*.py' | grep -q .; then
+            echo 'Unexpected Python assets in the current snapshot' >&2
+            exit 1
+          fi
   validate:
     needs: common
     if: ${{ always() }}
@@ -117,6 +130,7 @@ jobs:
     env:
       CODEX_VERSION: "0.172.0"
       CODEX_ARCHIVE_SHA256: a2342a8f7f68f088be30620ccfe9cb84162c93a6b56177855961cda3ed6be392
+      CODEX_EXEC_SERVER_ARCHIVE_SHA256: 1276ea8882a5c96fbc35fdb57c169198fe95f845dab0be864a8a0bc026efa8d5
     steps:
       - name: Require common verification
         env:
@@ -126,29 +140,46 @@ jobs:
         with:
           ref: ${{ env.CANDIDATE_SHA }}
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          python-version: "3.14"
+          go-version: "1.27.4"
+          cache: false
+      - name: Enable Ubuntu's restricted Bubblewrap profile
+        shell: bash
+        run: |
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apparmor-profiles bubblewrap
+          profile=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          test "$(dpkg-query --search "$profile")" = "apparmor-profiles: $profile"
+          test "$(dpkg-query --search /usr/bin/bwrap)" = "bubblewrap: /usr/bin/bwrap"
+          sudo apparmor_parser --replace "$profile"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
+          confined="$(/usr/bin/bwrap --unshare-user --unshare-pid --unshare-net --ro-bind / / --proc /proc -- /bin/cat /proc/self/attr/current)"
+          test "$confined" = 'bwrap//&unpriv_bwrap (enforce)'
       - name: Install pinned validation tools
         shell: bash
         run: |
-          python -m pip install --disable-pip-version-check PyYAML==6.0.3
-          asset=codex-x86_64-unknown-linux-musl
           tool_dir="$(mktemp -d "$RUNNER_TEMP/nstack-tools.XXXXXX")"
-          archive="$tool_dir/codex.tar.gz"
-          curl --fail --silent --show-error --location --retry 3 \
-            "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/${asset}.tar.gz" \
-            --output "$archive"
-          printf '%s  %s\n' "$CODEX_ARCHIVE_SHA256" "$archive" | sha256sum --check
-          tar -xzf "$archive" -C "$tool_dir" "$asset"
-          install -m 0755 "$tool_dir/$asset" "$tool_dir/codex"
-          printf '%s\n' "$tool_dir" >> "$GITHUB_PATH"
+          mkdir "$tool_dir/bin"
+          install_component() {
+            local name="$1" checksum="$2" destination="$3" asset archive
+            asset="${name}-x86_64-unknown-linux-musl"
+            archive="$tool_dir/$asset.tar.gz"
+            curl --fail --silent --show-error --location --retry 3 \
+              "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/${asset}.tar.gz" \
+              --output "$archive"
+            printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check
+            tar -xzf "$archive" -C "$tool_dir" "$asset"
+            install -m 0755 "$tool_dir/$asset" "$tool_dir/$destination"
+          }
+          install_component codex "$CODEX_ARCHIVE_SHA256" bin/codex
+          # The exec server stays next to Codex. Use Ubuntu's confined bwrap.
+          install_component codex-exec-server "$CODEX_EXEC_SERVER_ARCHIVE_SHA256" bin/codex-exec-server
+          printf '%s\n' "$tool_dir/bin" >> "$GITHUB_PATH"
       - name: Verify exact candidate without provider credentials
         shell: bash
         run: |
-          unset OPENAI_API_KEY CODEX_API_KEY
-          export CODEX_HOME
-          CODEX_HOME="$(mktemp -d "$RUNNER_TEMP/nstack-codex-home.XXXXXX")"
           actual_sha="$(git rev-parse HEAD)"
           test "$actual_sha" = "$CANDIDATE_SHA"
           cli_version="$(codex --version)"
@@ -156,8 +187,17 @@ jobs:
           {
             echo '### Offline candidate verification'
             printf '\n- Event: `%s`\n- Candidate SHA: `%s`\n- Codex: `%s`\n' "$GITHUB_EVENT_NAME" "$actual_sha" "$cli_version"
-            printf -- '- Python: `%s`\n- Git: `%s`\n' "$(python3 --version)" "$(git --version)"
-            printf -- '- PyYAML: `%s`\n' "$(python3 -c 'import yaml; print(yaml.__version__)')"
-            echo '- Evidence: native Codex offline discovery and configuration plus Codex protocol fixtures. Zero authenticated model turns.'
+            printf -- '- Go: `%s`\n- Git: `%s`\n' "$(go version)" "$(git --version)"
+            echo '- Evidence: native Codex offline discovery, configuration, sandbox and cancellation. Zero authenticated model turns.'
           } | tee -a "$GITHUB_STEP_SUMMARY"
-          python3 tests/validate.py --suite codex
+          goroot="$(go env GOROOT)"
+          isolated="$(mktemp -d "$RUNNER_TEMP/nstack-native.XXXXXX")"
+          mkdir "$isolated/bin" "$isolated/home" "$isolated/tmp" "$isolated/cache"
+          for command in codex codex-exec-server git; do
+            ln -s "$(command -v "$command")" "$isolated/bin/$command"
+          done
+          ln -s /usr/bin/bwrap "$isolated/bin/bwrap"
+          env -i HOME="$isolated/home" CODEX_HOME="$isolated/home" PATH="$goroot/bin:$isolated/bin" \
+            TMPDIR="$isolated/tmp" GOCACHE="$isolated/cache" GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
+            CGO_ENABLED=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=file \
+            NSTACK_CODEX_NATIVE_TEST=offline "$goroot/bin/go" test -mod=vendor -v ./internal/codex -run '^TestNativeOffline'

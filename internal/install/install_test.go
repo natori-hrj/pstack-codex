@@ -73,10 +73,9 @@ func TestRollbackToSealedPreviousRelease(t *testing.T) {
 	home := t.TempDir()
 	current := fixtureAssets(t)
 	previous := maps.Clone(current)
-	for path := range previous {
-		if rollbackOptionalDoc(path, true) {
-			delete(previous, path)
-		}
+	for _, path := range []string{"docs/opencode.md", "docs/opencode.ja.md", "docs/releases/v0.4.0.md",
+		"docs/releases/v0.4.0.ja.md", "docs/releases/v0.4.1.md", "docs/releases/v0.4.1.ja.md"} {
+		delete(previous, path)
 	}
 	apply(t, home, "stage", "previous", previous)
 	newSnapshot := apply(t, home, "stage", "current", current)
@@ -90,6 +89,123 @@ func TestRollbackToSealedPreviousRelease(t *testing.T) {
 		t.Fatal("accepted a sealed snapshot with a deleted file")
 	}
 	active(t, home, "previous")
+}
+
+func TestUnsealedRollbackCompleteness(t *testing.T) {
+	home := t.TempDir()
+	current := fixtureAssets(t)
+	legacy := maps.Clone(current)
+	for _, path := range []string{"docs/opencode.md", "docs/opencode.ja.md", "docs/behavior-v0.3.0.md",
+		"docs/releases/v0.4.0.md", "docs/releases/v0.4.0.ja.md", "docs/releases/v0.4.1.md", "docs/releases/v0.4.1.ja.md"} {
+		delete(legacy, path)
+	}
+	for _, path := range []string{"adapters/codex/check_role.py", "adapters/codex/install.py",
+		"adapters/codex/review.py", "adapters/codex/review_adapter.py", "adapters/review_workflow.py"} {
+		legacy[path] = []byte("legacy snapshot entry\n")
+	}
+	old := apply(t, home, "stage", "legacy", legacy)
+	if err := syscall.Removexattr(old, integrityAttribute); err != nil {
+		t.Fatal(err)
+	}
+	apply(t, home, "activate", "legacy", current)
+	active(t, home, "legacy")
+	newPath := apply(t, home, "stage", "current", current)
+	apply(t, home, "activate", "current", current)
+	apply(t, home, "activate", "legacy", current)
+	active(t, home, "legacy")
+
+	removeSeal := syscall.Removexattr(newPath, integrityAttribute)
+	if removeSeal != nil {
+		t.Fatal(removeSeal)
+	}
+	// The bundled rollback path must distinguish a genuine old snapshot
+	// from a current snapshot stripped of its checksum.
+	if _, err := run(home, "activate", "current", current, nil, false); err == nil || !strings.Contains(err.Error(), "incomplete unsealed snapshot") {
+		t.Fatalf("current snapshot without a seal was accepted: %v", err)
+	}
+	active(t, home, "legacy")
+	if err := os.Truncate(filepath.Join(old, "adapters/codex/install.py"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(home, "activate", "legacy", current, nil, false); err == nil || !strings.Contains(err.Error(), "adapters/codex/install.py") {
+		t.Fatalf("incomplete legacy snapshot was accepted: %v", err)
+	}
+}
+
+func TestCodexInstallCLIContract(t *testing.T) {
+	home := t.TempDir()
+	custom := filepath.Join(home, "agents", "nstack_implement.toml")
+	if err := os.Mkdir(filepath.Dir(custom), 0700); err != nil {
+		t.Fatal(err)
+	}
+	const role = "name = \"nstack_implement\"\nmodel = \"personal-model\"\n"
+	if err := os.WriteFile(custom, []byte(role), 0600); err != nil {
+		t.Fatal(err)
+	}
+	call := func(action, id, diagnostic string, want int) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := RunCLI([]string{"--home", home, action, id}, &stdout, &stderr)
+		if code != want {
+			t.Fatalf("%s %s: exit %d, want %d: %s", action, id, code, want, &stderr)
+		}
+		if want == 0 {
+			if stdout.String() != filepath.Join(home, "nstack", "snapshots", id)+"\n" || stderr.Len() != 0 {
+				t.Fatalf("%s %s: stdout=%q stderr=%q", action, id, &stdout, &stderr)
+			}
+		} else if stdout.Len() != 0 || !strings.Contains(stderr.String(), diagnostic) {
+			t.Fatalf("%s %s: stdout=%q stderr=%q", action, id, &stdout, &stderr)
+		}
+	}
+	call("stage", "../escape", "invalid snapshot identifier", 2)
+	call("stage", "first", "", 0)
+	call("stage", "first", "", 0)
+	if _, err := os.Stat(filepath.Join(home, "skills")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stage changed discovery: %v", err)
+	}
+	call("activate", "first", "", 0)
+	current := fixtureAssets(t)
+	changed := maps.Clone(current)
+	const readme = "README.md"
+	changed[readme] = []byte("changed release\n")
+	if _, err := run(home, "stage", "first", changed, nil, false); err == nil || !strings.Contains(err.Error(), "different files") {
+		t.Fatalf("snapshot ID was reusable for different contents: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(home, "nstack", "snapshots", "first", readme)); err != nil || !bytes.Equal(got, current[readme]) {
+		t.Fatalf("restaging modified the existing snapshot: %v", err)
+	}
+	call("stage", "second", "", 0)
+	skills := filepath.Join(home, "skills")
+	external := filepath.Join(t.TempDir(), "natori-mode")
+	if err := os.Mkdir(external, 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(skills, "custom-alias")
+	if err := os.Symlink(external, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{`"natori-mode" # inline comment`, `'natori-mode'`, ">-\n  natori-mode"} {
+		data := "---\nname: " + name + "\ndescription: collision\n---\n"
+		path := filepath.Join(external, "SKILL.md")
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		call("activate", "second", "move existing skill", 1)
+		active(t, home, "first")
+		if got, err := os.ReadFile(path); err != nil || string(got) != data {
+			t.Fatalf("installer changed user skill: %q, %v", got, err)
+		}
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	call("activate", "second", "", 0)
+	active(t, home, "second")
+	call("activate", "first", "", 0)
+	active(t, home, "first")
+	if got, err := os.ReadFile(custom); err != nil || string(got) != role {
+		t.Fatalf("installer changed user role: %q, %v", got, err)
+	}
 }
 
 func fixtureAssets(t *testing.T) map[string][]byte {
@@ -238,6 +354,42 @@ func TestConcurrentInstall(t *testing.T) {
 	}
 	apply(t, home, "activate", "same", fixtureAssets(t))
 	active(t, home, "same")
+}
+
+func TestPublishedInstallerLockPath(t *testing.T) {
+	home := t.TempDir()
+	apply(t, home, "stage", "old", fixtureAssets(t))
+	// v0.3.0 acquired LOCK_EX on this exact inode, independently of Go.
+	lock, err := os.Open(filepath.Join(home, "nstack", "lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	next := child(t, home, "stage", "new", "")
+	if err := next.Start(); err != nil {
+		t.Fatal(err)
+	}
+	wait := make(chan error, 1)
+	go func() { wait <- next.Wait() }()
+	select {
+	case err := <-wait:
+		t.Fatalf("installer bypassed the legacy flock: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if _, err := os.Stat(filepath.Join(home, "nstack", "snapshots", "new")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("snapshot appeared while the legacy lock was held: %v", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-wait; err != nil {
+		t.Fatal(err)
+	}
+	apply(t, home, "activate", "new", fixtureAssets(t))
+	active(t, home, "new")
 }
 
 func TestPublicationDoesNotOverwrite(t *testing.T) {
@@ -403,6 +555,11 @@ func TestRejectDamagedSnapshots(t *testing.T) {
 			apply(t, home, "activate", "old", files)
 			snapshot := apply(t, home, "stage", "new", files)
 			if test.legacy {
+				for _, path := range legacyUnsealedFiles {
+					if err := os.WriteFile(filepath.Join(snapshot, path), []byte("legacy snapshot entry\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if err := syscall.Removexattr(snapshot, integrityAttribute); err != nil {
 					t.Fatal(err)
 				}

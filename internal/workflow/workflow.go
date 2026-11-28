@@ -51,8 +51,8 @@ func within[T any](ctx context.Context, timeout time.Duration, stage string, run
 		return result, fmt.Errorf("%s: %w", stage, err)
 	}
 	result, err := run(ctx)
-	if ctx.Err() != nil {
-		return result, fmt.Errorf("%s: %w", stage, ctx.Err())
+	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+		err = errors.Join(ctxErr, err)
 	}
 	if err != nil {
 		return result, fmt.Errorf("%s: %w", stage, err)

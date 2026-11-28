@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/natori-hrj/nstack/internal/install"
 	"github.com/natori-hrj/nstack/internal/workflow"
 )
 
@@ -33,7 +35,9 @@ func TestNativeOffline(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
 	t.Setenv("HOME", home)
-	const config = "[mcp_servers.\"fixture.with.dot\"]\ncommand = \"false\"\n"
+	const config = "[mcp_servers.tool]\ncommand = \"false\"\n" +
+		"[mcp_servers.\"fixture.with.dot\"]\ncommand = \"false\"\n" +
+		"[mcp_servers.disabled]\ncommand = \"false\"\nenabled = false\n"
 	path := filepath.Join(home, "config.toml")
 	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
 		t.Fatal(err)
@@ -46,8 +50,8 @@ func TestNativeOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.close()
-	if disabled != 1 {
-		t.Fatalf("disabled MCP servers = %d, want 1", disabled)
+	if disabled != 2 {
+		t.Fatalf("disabled MCP servers = %d, want 2", disabled)
 	}
 	if err := s.verifyOAuth(); err == nil || !strings.Contains(err.Error(), "no authenticated account") {
 		t.Fatalf("anonymous account check = %v", err)
@@ -74,6 +78,74 @@ func TestNativeOffline(t *testing.T) {
 		t.Fatal("native configuration changed during discovery")
 	}
 	t.Logf("native config, no OAuth, read-only denial (%s), and confined workspace scratch verified", proof)
+}
+
+func TestNativeOfflineDiscovery(t *testing.T) {
+	requireNative(t, "offline")
+	home, cwd := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	evidence := t.TempDir()
+	installCLI := func(action, id string) {
+		t.Helper()
+		if code := install.RunCLI([]string{"--home", home, action, id}, os.Stdout, os.Stderr); code != 0 {
+			t.Fatalf("install %s %s: %d", action, id, code)
+		}
+	}
+	installCLI("stage", "first")
+	installCLI("stage", "second")
+	for i, id := range []string{"first", "second", "first"} {
+		installCLI("activate", id)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		s, err := startServer(ctx, cwd, filepath.Join(evidence, fmt.Sprintf("discover-%d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var list struct {
+			Data []struct {
+				Skills []struct {
+					Enabled bool   `json:"enabled"`
+					Name    string `json:"name"`
+					Path    string `json:"path"`
+				} `json:"skills"`
+			} `json:"data"`
+		}
+		err = s.request("skills/list", object{"cwds": []string{cwd}}, &list, nil)
+		err = errors.Join(err, s.close())
+		if err != nil {
+			t.Fatal(err)
+		}
+		skills := filepath.Join(home, "nstack", "snapshots", id, "skills")
+		expected, err := fs.Glob(os.DirFS(skills), "*/SKILL.md")
+		if err != nil || len(expected) != 26 {
+			t.Fatalf("installed catalog size=%d: %v", len(expected), err)
+		}
+		found := map[string][]string{}
+		for _, group := range list.Data {
+			for _, skill := range group.Skills {
+				if skill.Enabled {
+					resolved, err := filepath.EvalSymlinks(skill.Path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					found[skill.Name] = append(found[skill.Name], resolved)
+				}
+			}
+		}
+		for _, path := range expected {
+			name := filepath.Dir(path)
+			if paths := found[name]; len(paths) != 1 || paths[0] != filepath.Join(skills, path) {
+				t.Errorf("%s: %s resolved to %v", id, name, paths)
+			}
+		}
+		for _, old := range []string{"poteto-mode", "setup-pstack"} {
+			if len(found[old]) != 0 {
+				t.Errorf("legacy skill %s was discovered", old)
+			}
+		}
+	}
 }
 
 func TestNativeOAuth(t *testing.T) {
@@ -141,12 +213,19 @@ func TestNativeOfflineCancellation(t *testing.T) {
 	if err := os.WriteFile(probe, program, 0700); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
+	type commandOutcome struct{ commandErr, cleanupErr error }
+	done := make(chan commandOutcome, 1)
 	go func() {
 		defer close(done)
-		_, err := s.gate(cwd, []string{probe, "15"}, evidence)
-		s.close()
-		done <- err
+		result, err := s.gate(cwd, []string{probe, "15"}, evidence)
+		if err == nil && result.ExitCode != nil && *result.ExitCode != 0 {
+			err = fmt.Errorf("native child command exited %d: %s", *result.ExitCode, *result.Stderr)
+		}
+		cleanup := s.close()
+		if s.close() != cleanup {
+			cleanup = errors.New("repeated cleanup did not preserve its result")
+		}
+		done <- commandOutcome{err, cleanup}
 	}()
 	// The sandbox uses a PID namespace. Observe the actual host PID by
 	// matching the unique test executable's comm value.
@@ -163,16 +242,28 @@ func TestNativeOfflineCancellation(t *testing.T) {
 				break
 			}
 		}
-		if ctx.Err() != nil {
-			t.Fatalf("could not find native child: %v (command error: %v)", ctx.Err(), <-done)
-		}
 		if pid == 0 {
-			time.Sleep(10 * time.Millisecond)
+			select {
+			case outcome := <-done:
+				t.Fatalf("native command ended before its child was observed: %v", errors.Join(outcome.commandErr, outcome.cleanupErr))
+			case <-ctx.Done():
+				outcome := <-done
+				t.Fatalf("could not find native child: %v (command error: %v)", ctx.Err(), errors.Join(outcome.commandErr, outcome.cleanupErr))
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
 	}
+	fd := trackFixtureProcess(t, pid)
+	armFixtureCleanup(t, fd, pid, func() bool {
+		want, wantErr := os.Stat(probe)
+		actual, actualErr := os.Stat(fmt.Sprintf("/proc/%d/exe", pid))
+		return wantErr == nil && actualErr == nil && os.SameFile(want, actual)
+	})
 	cancel()
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected cancellation, got %v", err)
+	outcome := <-done
+	if !errors.Is(outcome.commandErr, context.Canceled) || outcome.cleanupErr != nil {
+		t.Fatalf("expected cancellation and confirmed cleanup, got command=%v cleanup=%v", outcome.commandErr, outcome.cleanupErr)
 	}
-	assertStopped(t, pid)
+	assertReaped(t, fd)
+	t.Logf("native child %d observed, stopped and reaped before cancellation completed", pid)
 }

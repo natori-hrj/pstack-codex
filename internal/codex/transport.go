@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -23,12 +24,11 @@ var disabledFeatures = []string{"apps", "plugins", "hooks", "memories", "multi_a
 
 type server struct {
 	ctx    context.Context
-	cmd    *exec.Cmd
 	input  io.WriteCloser
 	output io.ReadCloser
-	log    *os.File
 	lines  *bufio.Scanner
 	nextID int
+	wait   func() error
 }
 
 func startServer(ctx context.Context, cwd, evidence string, overrides ...string) (*server, error) {
@@ -43,7 +43,23 @@ func startServer(ctx context.Context, cwd, evidence string, overrides ...string)
 		"-c", `shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"`,
 		"-c", `web_search="disabled"`,
 	)
-	cmd := exec.CommandContext(ctx, "codex", append(args, overrides...)...)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if os.Getenv("CODEX_EXEC_SERVER_URL") != "" {
+		return nil, errors.New("Codex requires local supervised execution; CODEX_EXEC_SERVER_URL must be unset")
+	}
+	codexPath, err := exec.LookPath("codex")
+	if err != nil {
+		return nil, err
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	supervisorArgs := []string{SupervisorArgument, codexPath}
+	supervisorArgs = append(supervisorArgs, args...)
+	cmd := exec.Command(self, append(supervisorArgs, overrides...)...)
 	cmd.Dir = cwd
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
@@ -55,7 +71,6 @@ func startServer(ctx context.Context, cwd, evidence string, overrides ...string)
 	}
 	cmd.Env = append(cmd.Env, "PYTHONDONTWRITEBYTECODE=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = time.Second
 	log, err := os.OpenFile(evidence+".stderr", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, err
@@ -72,20 +87,52 @@ func startServer(ctx context.Context, cwd, evidence string, overrides ...string)
 		log.Close()
 		return nil, err
 	}
-	cmd.Cancel = func() error {
-		err := killGroup(cmd.Process.Pid)
-		// Closing our pipes also wakes blocked I/O if an inherited descriptor
-		// survived in a process outside the server group.
-		_ = input.Close()
-		_ = output.Close()
-		return err
+	controlRead, controlWrite, err := os.Pipe()
+	if err != nil {
+		input.Close()
+		output.Close()
+		log.Close()
+		return nil, err
 	}
+	defer controlRead.Close()
+	cmd.ExtraFiles = []*os.File{controlRead}
 	if err := cmd.Start(); err != nil {
+		controlWrite.Close()
 		input.Close()
 		output.Close()
 		log.Close()
 		return nil, fmt.Errorf("start Codex app-server: %w", err)
 	}
+	stop := sync.OnceFunc(func() {
+		// The supervisor survives caller cancellation and acknowledges
+		// cleanup by exiting. Closing RPC pipes also wakes blocked readers.
+		_ = controlWrite.Close()
+		_ = input.Close()
+		_ = output.Close()
+	})
+	disarm := context.AfterFunc(ctx, stop)
+	wait := sync.OnceValue(func() error {
+		disarm()
+		stop()
+		done := make(chan error, 1)
+		go func() {
+			err := cmd.Wait()
+			_ = log.Close()
+			done <- err
+		}()
+		var err error
+		select {
+		case err = <-done:
+		case <-time.After(cleanupTimeout + time.Second):
+			// Killing the supervisor here could orphan the very processes
+			// it is draining. Report unconfirmed cleanup instead.
+			err = errors.New("supervisor did not acknowledge shutdown")
+		}
+		if err != nil {
+			return fmt.Errorf("Codex descendant cleanup not confirmed (%s): %w", log.Name(), err)
+		}
+		return nil
+	})
 	lines := bufio.NewScanner(output)
 	lines.Buffer(make([]byte, 64<<10), 8<<20)
 	lines.Split(func(data []byte, atEOF bool) (int, []byte, error) {
@@ -94,35 +141,19 @@ func startServer(ctx context.Context, cwd, evidence string, overrides ...string)
 		}
 		return bufio.ScanLines(data, atEOF)
 	})
-	s := &server{ctx: ctx, cmd: cmd, input: input, output: output, lines: lines, log: log}
+	s := &server{ctx: ctx, input: input, output: output, lines: lines, wait: wait}
 	var initialized object
 	if err := s.request("initialize", object{"clientInfo": object{"name": "nstack-review", "version": "0.3.0"}}, &initialized, nil); err != nil {
-		s.close()
-		return nil, err
+		return nil, errors.Join(err, s.close())
 	}
 	if err := s.send(object{"method": "initialized"}); err != nil {
-		s.close()
-		return nil, err
+		return nil, errors.Join(err, s.close())
 	}
 	return s, nil
 }
 
-func killGroup(pid int) error {
-	err := syscall.Kill(-pid, syscall.SIGKILL)
-	if errors.Is(err, syscall.ESRCH) {
-		return os.ErrProcessDone
-	}
-	return err
-}
-
-func (s *server) close() {
-	// Reap even after cancellation or EOF. The private group can still
-	// contain helpers after the app-server itself stops.
-	_ = killGroup(s.cmd.Process.Pid)
-	_ = s.input.Close()
-	_ = s.cmd.Wait()
-	_ = s.output.Close()
-	_ = s.log.Close()
+func (s *server) close() error {
+	return s.wait()
 }
 
 func (s *server) send(value object) error {

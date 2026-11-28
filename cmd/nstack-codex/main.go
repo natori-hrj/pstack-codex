@@ -21,6 +21,12 @@ func run() int {
 		return 2
 	}
 	switch os.Args[1] {
+	case codex.SupervisorArgument:
+		if err := codex.Supervise(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "Codex process supervisor:", err)
+			return 1
+		}
+		return 0
 	case "review":
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()

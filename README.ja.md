@@ -6,6 +6,8 @@
 
 nstack は、Lauren Tan (Poteto) の pstack を土台にした Go ベースのエンジニアリングツールキットです。共通のワークフロースキル14件、原則12件、プレイブック7件を収録しています。観測可能な受け入れ条件を定め、必要な変更を絞り、候補そのものを検証します。
 
+v0.4.1 から、ビルド・テスト・CI・インストール・自動実行は Go 実装と共通資産に統一され、Python と PyYAML は不要です。旧実装は公開済みタグに残ります。
+
 | ハーネス | Workflow Support | Native Automation |
 |---|---|---|
 | [Codex](docs/codex.ja.md) | スキル、ロール、手動ワークフロー | Codex Adapter を使う Go 版 `nstack review`・`check-role` |
@@ -21,6 +23,8 @@ nstack は、Lauren Tan (Poteto) の pstack を土台にした Go ベースの�
 
 Codex への導入:
 
+ロール例3件も導入する場合は、実行前にシェルで `NSTACK_INSTALL_EXAMPLE_ROLES=1` を環境変数として設定します。コピーは有効化の成功後にだけ行い、既存のロールファイルとシンボリックリンクは上書きしません。
+
 ```sh
 (
   set -e
@@ -29,6 +33,15 @@ Codex への導入:
   snapshot="${snapshot##*sha256:}"
   nstack install --home "$config_dir" stage "$snapshot"
   nstack install --home "$config_dir" activate "$snapshot"
+  if [ "${NSTACK_INSTALL_EXAMPLE_ROLES:-0}" = 1 ]; then
+    mkdir -p "$config_dir/agents"
+    for agent in "$config_dir/nstack/snapshots/$snapshot"/examples/agents/*.toml; do
+      dest="$config_dir/agents/${agent##*/}"
+      if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+        (set -C; cat "$agent" > "$dest")
+      fi
+    done
+  fi
 )
 ```
 
@@ -38,4 +51,16 @@ Codex への導入:
 
 バイナリの実行に Python・PyYAML・Go は不要です。Workflow Support には対象ハーネス、自動レビューには Git、許可済み OAuth で使う Codex CLI と品質ゲートのツール、PR 納品には `gh` が必要です。インストーラーには Linux の procfs、flock、原子的 rename、ユーザー拡張属性と、実行ユーザー所有で他者が書き込めない管理ディレクトリが必要です。中断時に探索対象外へ作業ファイルが残る場合があります。原子的な切り替えは電断時の耐久性を保証しません。
 
-[再現ビルドと配布手順](docs/releases/v0.4.0.ja.md)（Go 1.25 以降、検証は 1.27.4） · [アダプター契約](docs/adapters.ja.md) · [スキル一覧](docs/skills.ja.md) · [上流と出典](docs/upstream.ja.md) · [MIT](LICENSE) · [上流 MIT](LICENSE-upstream) · [v0.3.0 参照資料](docs/v0.3.0.md)
+## 開発と検証
+
+Linux 上で Git と Go 1.25 以降（CI は 1.27.4）を使います。Go モジュールは同梱済みです。race test には C コンパイラが必要です。
+
+```sh
+go vet -mod=vendor ./...
+go test -mod=vendor ./...
+CGO_ENABLED=1 go test -mod=vendor -race ./...
+```
+
+CI は PR の head または `main` に push された SHA を検証します。`common` は Go テスト、race test、再現ビルドを、`validate` は追加で[実 Codex のオフライン検証](docs/codex.ja.md#検証と測定)を実行します。テストには一時 Git リポジトリとプロトコル fixture を使います。認証済みモデルの検証は別です。
+
+[v0.4.1 リリースノート・再現ビルド](docs/releases/v0.4.1.ja.md) · [アダプター契約](docs/adapters.ja.md) · [スキル一覧](docs/skills.ja.md) · [上流と出典](docs/upstream.ja.md) · [MIT](LICENSE) · [上流 MIT](LICENSE-upstream) · [v0.3.0 参照資料](docs/v0.3.0.md)

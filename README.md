@@ -6,6 +6,8 @@
 
 nstack is a Go-based engineering toolkit for agent-assisted development, built on Lauren Tan (Poteto)’s pstack. Its shared library contains 14 workflow skills, 12 engineering principles, and seven playbooks. Define an observable outcome, make the smallest useful change, and verify the exact candidate.
 
+Since v0.4.1, nstack's build, tests, CI, installer and automation use the Go implementation and shared assets. Python and PyYAML are no longer required. Published tags retain the old implementation.
+
 | Harness | Workflow Support | Native Automation |
 |---|---|---|
 | [Codex](docs/codex.md) | Skills, roles and manual workflow | Go `nstack review` and `check-role` using the Codex adapter |
@@ -21,6 +23,8 @@ Use the appropriate [release asset](https://github.com/natori-hrj/nstack/release
 
 For Codex:
 
+Set `NSTACK_INSTALL_EXAMPLE_ROLES=1` in the shell before running this block if you also want the three example roles. The optional copy runs only after activation succeeds and skips existing role files and symlinks.
+
 ```sh
 (
   set -e
@@ -29,6 +33,15 @@ For Codex:
   snapshot="${snapshot##*sha256:}"
   nstack install --home "$config_dir" stage "$snapshot"
   nstack install --home "$config_dir" activate "$snapshot"
+  if [ "${NSTACK_INSTALL_EXAMPLE_ROLES:-0}" = 1 ]; then
+    mkdir -p "$config_dir/agents"
+    for agent in "$config_dir/nstack/snapshots/$snapshot"/examples/agents/*.toml; do
+      dest="$config_dir/agents/${agent##*/}"
+      if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+        (set -C; cat "$agent" > "$dest")
+      fi
+    done
+  fi
 )
 ```
 
@@ -51,6 +64,18 @@ sha256sum nstack-linux-amd64 nstack-linux-arm64 > SHA256SUMS
 sha256sum -c SHA256SUMS
 ```
 
-See [release preparation](docs/releases/v0.4.0.md) for reproduction and notices, and the [adapter contract](docs/adapters.md) for quality and delivery boundaries.
+## Develop and verify
+
+On Linux, use Git and Go with the vendored modules. A C compiler is needed for the race detector:
+
+```sh
+go vet -mod=vendor ./...
+go test -mod=vendor ./...
+CGO_ENABLED=1 go test -mod=vendor -race ./...
+```
+
+CI verifies the exact PR head or main push SHA. `common` runs the Go tests, race tests and reproducible distribution checks; `validate` adds [native offline Codex verification](docs/codex.md#verification). The tests use disposable Git repositories and protocol doubles. Authenticated model tests are separate.
+
+See the [v0.4.1 release notes](docs/releases/v0.4.1.md) for reproduction and notices, and the [adapter contract](docs/adapters.md) for quality and delivery boundaries.
 
 [Skills](docs/skills.md) · [Upstream provenance](docs/upstream.md) · [MIT](LICENSE) · [Upstream MIT](LICENSE-upstream) · [v0.3.0 reference](docs/v0.3.0.md)

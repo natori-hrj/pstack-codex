@@ -203,8 +203,8 @@ func stage(state, snapshots directory, id string, assets map[string][]byte, chec
 			started = true
 		}
 	}
-	// Python's temporary parent is private; its published snapshot is a
-	// normal directory. Apply permissions through the pinned descriptor.
+	// Publish a normal directory from private staging. Apply permissions
+	// through the pinned descriptor.
 	info, err := state.Stat()
 	if err != nil {
 		return err
@@ -217,7 +217,7 @@ func stage(state, snapshots directory, id string, assets map[string][]byte, chec
 		return err
 	}
 	// Keep the checksum on the directory inode: it is published atomically
-	// with the payload and does not change Python's snapshot file list.
+	// with the payload and adds no paths to the snapshot file list.
 	if err := syscall.Setxattr(scratch.path("."), integrityAttribute, digest, 0); err != nil {
 		return fmt.Errorf("seal staged snapshot: %w", err)
 	}
@@ -231,6 +231,17 @@ func stage(state, snapshots directory, id string, assets map[string][]byte, chec
 }
 
 const integrityAttribute = "user.nstack.snapshot.sha256"
+
+// The v0.3.0 installer shipped these files and no integrity attribute. Retain
+// its completeness checks for unsealed rollback targets, including when a
+// current snapshot loses its seal. Sealed targets verify their original bytes.
+var legacyUnsealedFiles = [...]string{
+	"adapters/codex/check_role.py",
+	"adapters/codex/install.py",
+	"adapters/codex/review.py",
+	"adapters/codex/review_adapter.py",
+	"adapters/review_workflow.py",
+}
 
 func inspect(snapshot directory, assets map[string][]byte, exact bool) ([]byte, error) {
 	var sealed [sha256.Size]byte
@@ -248,7 +259,7 @@ func inspect(snapshot directory, assets map[string][]byte, exact bool) ([]byte, 
 	}
 	defer root.Close()
 	sum := sha256.New()
-	found := make(map[string]bool)
+	found := make(map[string]int64)
 	directories := map[string]bool{".": true}
 	for path := range assets {
 		for ancestor := filepath.Dir(path); !directories[ancestor]; ancestor = filepath.Dir(ancestor) {
@@ -306,7 +317,7 @@ func inspect(snapshot directory, assets map[string][]byte, exact bool) ([]byte, 
 				return fmt.Errorf("different snapshot entry: %s", path)
 			}
 		}
-		found[path] = true
+		found[path] = info.Size()
 		return nil
 	})
 	if err != nil {
@@ -316,8 +327,15 @@ func inspect(snapshot directory, assets map[string][]byte, exact bool) ([]byte, 
 		if !exact && rollbackOptionalDoc(path, hasSeal) {
 			continue
 		}
-		if !found[path] {
+		if _, exists := found[path]; !exists {
 			return nil, fmt.Errorf("incomplete snapshot: missing %s", path)
+		}
+	}
+	if !exact && !hasSeal {
+		for _, path := range legacyUnsealedFiles {
+			if found[path] == 0 {
+				return nil, fmt.Errorf("incomplete unsealed snapshot: missing or empty %s", path)
+			}
 		}
 	}
 	digest := sum.Sum(nil)
@@ -331,7 +349,8 @@ func inspect(snapshot directory, assets map[string][]byte, exact bool) ([]byte, 
 // Exact staging still requires them, and sealed snapshots still verify every byte.
 func rollbackOptionalDoc(path string, sealed bool) bool {
 	switch path {
-	case "docs/opencode.md", "docs/opencode.ja.md", "docs/releases/v0.4.0.md", "docs/releases/v0.4.0.ja.md":
+	case "docs/opencode.md", "docs/opencode.ja.md", "docs/releases/v0.4.0.md", "docs/releases/v0.4.0.ja.md",
+		"docs/releases/v0.4.1.md", "docs/releases/v0.4.1.ja.md":
 		return true
 	case "docs/behavior-v0.3.0.md":
 		return !sealed

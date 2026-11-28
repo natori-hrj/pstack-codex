@@ -3,11 +3,11 @@ package codex
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -33,43 +33,12 @@ func waitForPID(ctx context.Context, path string) (int, error) {
 	}
 }
 
-func assertStopped(t *testing.T, pid int) {
-	t.Helper()
-	path := filepath.Join("/proc", strconv.Itoa(pid), "stat")
-	for deadline := time.Now().Add(time.Second); ; {
-		data, err := os.ReadFile(path)
-		// Procfs can find the PID when opening /stat and lose it before
-		// reading. Both kernel results mean the observed child is gone.
-		if os.IsNotExist(err) || errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		// A zombie is already dead; the host's PID 1 reaps adopted children.
-		if end := strings.LastIndexByte(string(data), ')'); end >= 0 && strings.HasPrefix(string(data[end+1:]), " Z ") {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("child %d still running: %s", pid, data)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 func TestTurnTeardown(t *testing.T) {
-	fixture, err := os.ReadFile("../../tests/fixtures/review_app_server.py")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bin, home := t.TempDir(), t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "codex"), fixture, 0700); err != nil {
-		t.Fatal(err)
-	}
+	installProtocolDouble(t)
+	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CODEX_HOME", home)
 	for _, test := range []struct {
 		name, scenario string
@@ -102,6 +71,11 @@ func TestTurnTeardown(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			fd := trackFixtureProcess(t, pid)
+			armFixtureArgCleanup(t, fd, pid, pidFile)
+			if test.want == nil {
+				fixtureWrite(pidFile+".exit", "")
+			}
 			if test.want == context.Canceled {
 				cancel()
 			}
@@ -113,7 +87,41 @@ func TestTurnTeardown(t *testing.T) {
 			} else if !errors.Is(got, test.want) {
 				t.Fatalf("expected %v, got %v", test.want, got)
 			}
-			assertStopped(t, pid)
+			assertReaped(t, fd)
 		})
 	}
+}
+
+func TestCancelledGateStopsChild(t *testing.T) {
+	installProtocolDouble(t)
+	home, checkout, scratch := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	fixtureWrite(filepath.Join(home, "config.toml"), "")
+	pidFile := filepath.Join(scratch, "pid")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	a := &Adapter{timeout: 10 * time.Second}
+	done := make(chan error, 1)
+	go func() {
+		result, err := a.Gate(ctx, workflow.GateRequest{
+			Directory: checkout, Scratch: scratch, Evidence: filepath.Join(scratch, "gate"),
+			Argv: []string{"/bin/sh", "-c", `printf '%s\n' "$$" > "$1"; /bin/sleep 30`, "gate", pidFile},
+		})
+		if err == nil && result.ExitCode != nil {
+			err = fmt.Errorf("cancelled gate returned terminal code %d", *result.ExitCode)
+		}
+		done <- err
+	}()
+	pid, err := waitForPID(ctx, pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd := trackFixtureProcess(t, pid)
+	armFixtureArgCleanup(t, fd, pid, pidFile)
+	cancel()
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation was not preserved: %v", err)
+	}
+	assertReaped(t, fd)
 }

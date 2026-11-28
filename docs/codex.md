@@ -24,7 +24,7 @@ The [role examples](../examples/agents/) set Sol for implementation and authoriz
 
 ## Verification
 
-Run `python3 tests/validate.py` for all offline checks. Use `--suite common` for the skill catalog, Git and portable workflow fixtures without Codex, or `--suite codex` for manifest, TOML, native discovery/configuration and Codex protocol fixtures. The concurrent workers are deterministic Git fixtures. The v0.1.0 live checks on Codex CLI 0.172.0 verified the model requests and outcomes, with historical details in the [Japanese record](codex.ja.md). Session metadata identifies the configured model. It cannot independently establish the serving backend’s identity.
+Run `go test -mod=vendor ./...` for the skill catalog, manifest, TOML and installer checks, portable Git and delivery fixtures, and simulated Codex protocol regressions. The Git fixtures verify checkout behavior. For native skill discovery, configuration, sandbox and cancellation without credentials, use Codex CLI 0.172.0 and run `NSTACK_CODEX_NATIVE_TEST=offline go test -mod=vendor -v ./internal/codex -run '^TestNativeOffline'`. The separate `NSTACK_CODEX_NATIVE_TEST=oauth go test -mod=vendor -v ./internal/codex -run '^TestNativeOAuth$'` smoke requires authorization to use the existing OAuth account and runs Sol and Astra on disposable data. Session metadata identifies the configured model; it cannot independently establish the serving backend’s identity. See the [Japanese record](codex.ja.md) for historical live checks.
 
 For comparisons, record elapsed time, agent runs, reviews, human interventions, and verified tasks using the same criteria. Codex JSONL usage includes input, cached input, and output tokens. Derive uncached input by subtraction. Keep session logs and IDs outside this repository. Comparative evidence is required for efficiency claims.
 
@@ -32,9 +32,7 @@ For comparisons, record elapsed time, agent runs, reviews, human interventions, 
 
 ## Role preflight
 
-With the standalone binary, use `nstack check-role <installed-role.toml> < model-list.json`. For automated review, use `nstack review` with the arguments in the example below, including `--` before the gate. The Python entry points below are the reference alternatives. PyYAML is needed for the Python distribution tests, not for the Go binary. A user-specified gate still needs whichever tools it runs.
-
-Read the installed role TOML and check discovery in the intended scope. Through an app-server for the same account and client, request `model/list` with `includeHidden: true` and collect all pages into one `{"data": [...]}` JSON result. Run `python3 adapters/codex/check_role.py <installed-role.toml> < model-list.json`. For an inherited model, resolve it in the active session and pass `--inherited-model` and, if applicable, `--inherited-effort`. The catalog indicates advertised access; record a completed response separately when a live gate is required.
+Read the installed role TOML and check discovery in the intended scope. Through an app-server for the same account and client, request `model/list` with `includeHidden: true` and collect all pages into one `{"data": [...]}` JSON result. Run `nstack check-role <installed-role.toml> < model-list.json`. For an inherited model, resolve it in the active session and pass `--inherited-model` and, if applicable, `--inherited-effort`. The catalog indicates advertised access; record a completed response separately when a live gate is required.
 
 Copy `adapters/codex/optional/nstack_security_daybreak.toml` to the agents directory only if you intend to use that route. Explicitly select it for an authorized defensive task and pass `--daybreak-selected` to preflight. Require `availableAccessPrograms.cyber` to advertise `daybreakBlue`. Select the program for that session with `--cyber-access-program daybreak_blue` if required by the client. Keep the global program default off. If the role, model or access is unavailable, stop dispatch and report the reason. Model substitutions require an explicit choice.
 
@@ -42,29 +40,25 @@ Copy `adapters/codex/optional/nstack_security_daybreak.toml` to the agents direc
 
 Native custom agents can select a configured model and return results to their parent. Their effective sandbox and approvals are inherited. Use that route when the parent already has the required read-only permissions. A single parent with a writable implementation scope cannot enforce a read-only child review. The host entrypoint uses separate native app-server processes and ephemeral threads for the writer and each reviewer.
 
-Run once from an authorized host with Python 3.11+, Git, Codex CLI 0.172.0, and an authenticated Codex account. Use an exclusive, clean feature checkout and a task brief containing observable acceptance criteria. The host must be able to write Codex's runtime state and start its normal sandbox. The adapter uses the normal Codex home and credential store. It reads the effective MCP configuration for each checkout, applies process-local Codex `-c` overrides, and verifies that every MCP server is disabled before dispatch. User and project files are preserved. Apps, plugins, hooks, memories, web search and native delegation are disabled for these child processes. The Codex sandbox restricts writes and network, and can allow reads outside the checkout. Use a separate restricted host account if you need stronger filesystem read isolation.
+Run `nstack review` from an authorized host with Git, Codex CLI 0.172.0, and an existing ChatGPT OAuth login. Use an exclusive, clean feature checkout and a task brief containing observable acceptance criteria. The host must be able to write Codex's runtime state and start its normal sandbox. The adapter uses the normal Codex home and credential store. It reads the effective MCP configuration for each checkout, applies process-local Codex `-c` overrides, and verifies that every MCP server is disabled before dispatch. User and project files are preserved. Apps, plugins, hooks, memories, web search and native delegation are disabled for these child processes. The Codex sandbox restricts writes and network, and can allow reads outside the checkout. Use a separate restricted host account if you need stronger filesystem read isolation.
+
+Native review requires Linux pidfds (including `waitid(P_PIDFD)`, available since Linux 5.4), subreaper support, and a procfs view of the current PID namespace with per-thread `children` files. Leave `CODEX_EXEC_SERVER_URL` unset so Codex executes locally within the managed process tree. The supervisor stops and reaps descendants before confirming teardown. Missing capabilities or unconfirmed cleanup block the workflow; see the error in `status.json` and any supervisor diagnostics in the stage's `.stderr` file. This requires neither root privileges nor cgroup delegation.
 
 ```sh
-python3 adapters/codex/review.py --authorize-host \
+nstack review --authorize-host \
   --work-ref refs/heads/nstack-work-example \
   --repo /path/to/feature-checkout --base <base-sha> \
   --brief /path/to/acceptance.md --evidence /path/to/new-private-directory \
   --implement-model gpt-6.2-sol --implement-effort medium \
   --review-model gpt-6.2-astra --review-effort medium \
-  -- python3 tests/validate.py
+  -- /bin/sh -c 'GOCACHE="$TMPDIR/go-cache" GOTOOLCHAIN=local go test -mod=vendor ./...'
 ```
 
 Use `--review-only` to verify an existing clean commit. Authorize writes with `--work-ref refs/heads/<work>`, a new local ref created only when writes are needed. The starting ref is retained. To authorize delivery, explicitly pass `--push <remote> --delivery-ref refs/heads/<feature>`, distinct from the local work ref. To update an existing PR only, add `--github-repo <owner/repo> --pr-base <branch> --pr-number <number>`. Use `--pr-title <title>` instead of the number to authorize finding or creating a draft.
 
 Preflight checks effective settings, authentication, advertised model and effort, requested thread settings, actual review write denial, and the ability to write to the gate's dedicated scratch directory. It checks effective thread settings before sending prompts and rejects reported model reroutes. A clean checkout of each candidate runs the supplied gate with its own scratch space. Review starts in a separate checkout and context. A structured verdict must identify the full SHA. Demonstrated findings run through at most two fresh remediation rounds. Gate failures, missing evidence, blocked verdicts, repeated findings and permission or authentication errors stop delivery. The private evidence directory contains per-candidate gate outputs, model and sandbox settings, thread/turn IDs, structured verdicts, available usage counts and delivery status. It can contain repository content and should stay outside Git.
 
-Delivery resolves one effective Git push destination and rejects an unverified remote HEAD. PR delivery requires the reviewed SHA range to match the PR merge base and head. Fetch the current base branch before running when that revision is missing locally. A changes-requested verdict in review-only mode exits nonzero and records `changes_requested` in `status.json`. The full distribution quality gate also requires PyYAML for skill frontmatter checks.
-
-### Go host adapter
-
-Build the [standalone nstack binary](../README.md#standalone-go-binary) from this checkout (Go 1.25+, Linux). The Go command uses Codex CLI 0.172.0 and requires an existing ChatGPT OAuth login for review. Run `nstack review` with the review arguments above, including the literal `--` before the gate command. `nstack check-role <installed-role.toml> < model-list.json` checks advertised role capabilities using the same input as the Python command. Existing builds named `nstack-codex` accept the same arguments.
-
-`python3 -B tests/go_compatibility.py` replays the shared workflow, role and app-server fixtures without credentials. `NSTACK_CODEX_NATIVE_TEST=offline go test -v ./internal/codex -run '^TestNativeOffline'` exercises native Codex without credentials. The separate `NSTACK_CODEX_NATIVE_TEST=oauth go test -v ./internal/codex -run '^TestNativeOAuth$'` smoke requires authorization to use the existing OAuth account and runs Sol and Astra on disposable data.
+Delivery resolves one effective Git push destination and rejects an unverified remote HEAD. PR delivery requires the reviewed SHA range to match the PR merge base and head. Fetch the current base branch before running when that revision is missing locally. A changes-requested verdict in review-only mode exits nonzero and records `changes_requested` in `status.json`. Put the literal `--` before the gate command and install the tools that your gate runs. Existing Go builds named `nstack-codex` accept the same arguments.
 
 The build vendors the TOML parser; its MIT notice is in [vendor/github.com/BurntSushi/toml/COPYING](../vendor/github.com/BurntSushi/toml/COPYING).
 

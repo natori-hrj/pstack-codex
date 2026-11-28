@@ -4,6 +4,10 @@ This is the compatibility target for the Go migration: `v0.3.0`, commit
 `bb8206a95bffb8908d75be8538e3e106bf280266`. It describes the shipped Python
 entry points; the fixtures below are test interfaces, not new runtime commands.
 
+Historical commands in this document are run from the matching published tag.
+The last Python/Go comparison suite is in [v0.4.0](https://github.com/natori-hrj/nstack/tree/v0.4.0/tests).
+In v0.4.1 the corresponding contract tests run with `go test -mod=vendor ./...`.
+
 ## Install and role preflight
 
 | Entry point | Inputs and observable behavior |
@@ -95,7 +99,7 @@ running serially or parsing a reply as JSON locally.
   the legacy review argv in a private temporary Git fixture, with the case in
   `NSTACK_CONTRACT_SCENARIO`. The test launcher must select a deterministic
   adapter named `portable-fixture` implementing the behavior in
-  [`tests/fixtures/portable_review.py`](../tests/fixtures/portable_review.py);
+  [`tests/fixtures/portable_review.py`](https://github.com/natori-hrj/nstack/blob/v0.4.0/tests/fixtures/portable_review.py);
   it should not start a live harness. The runner checks real exit codes, refs,
   files and candidate-bound evidence without requiring stable temp paths,
   Git object IDs or elapsed time. Use the same runner for both launchers as

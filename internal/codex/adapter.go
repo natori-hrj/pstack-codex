@@ -64,7 +64,9 @@ func open(ctx context.Context, cwd, evidence string, requireOAuth bool) (*server
 	cfg, active, err := s.config(cwd)
 	disabled := len(active)
 	if err == nil && disabled != 0 {
-		s.close()
+		if err := s.close(); err != nil {
+			return nil, 0, err
+		}
 		entries := make([]string, 0, disabled)
 		for _, name := range active {
 			quoted, err := json.Marshal(name)
@@ -89,8 +91,7 @@ func open(ctx context.Context, cwd, evidence string, requireOAuth bool) (*server
 		err = s.verifyOAuth()
 	}
 	if err != nil {
-		s.close()
-		return nil, 0, err
+		return nil, 0, errors.Join(err, s.close())
 	}
 	return s, disabled, nil
 }
@@ -277,14 +278,14 @@ func (s *server) probeScratch(cwd, parent string) error {
 	return nil
 }
 
-func (a *Adapter) Preflight(ctx context.Context, cwd string, reviewer workflow.Role, evidence string) (workflow.Evidence, error) {
+func (a *Adapter) Preflight(ctx context.Context, cwd string, reviewer workflow.Role, evidence string) (_ workflow.Evidence, resultErr error) {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
 	s, disabled, err := open(ctx, cwd, evidence, true)
 	if err != nil {
 		return nil, err
 	}
-	defer s.close()
+	defer func() { resultErr = errors.Join(resultErr, s.close()) }()
 	if err := s.checkRole(reviewer); err != nil {
 		return nil, err
 	}
@@ -303,14 +304,14 @@ func (a *Adapter) Preflight(ctx context.Context, cwd string, reviewer workflow.R
 		"roles": []object{{"model": state.Model, "effort": state.ReasoningEffort, "sandbox": state.Sandbox.Type}}}, ctx.Err()
 }
 
-func (a *Adapter) Gate(ctx context.Context, req workflow.GateRequest) (workflow.GateResult, error) {
+func (a *Adapter) Gate(ctx context.Context, req workflow.GateRequest) (_ workflow.GateResult, resultErr error) {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
 	s, _, err := open(ctx, req.Directory, req.Evidence, true)
 	if err != nil {
 		return workflow.GateResult{}, err
 	}
-	defer s.close()
+	defer func() { resultErr = errors.Join(resultErr, s.close()) }()
 	result, err := s.gate(req.Directory, req.Argv, req.Scratch)
 	if err != nil {
 		return workflow.GateResult{}, err
@@ -318,7 +319,7 @@ func (a *Adapter) Gate(ctx context.Context, req workflow.GateRequest) (workflow.
 	return workflow.GateResult{ExitCode: result.ExitCode, Evidence: workflow.Evidence{"stdout": *result.Stdout, "stderr": *result.Stderr}}, ctx.Err()
 }
 
-func (a *Adapter) Run(ctx context.Context, req workflow.TurnRequest) (workflow.TurnResult, error) {
+func (a *Adapter) Run(ctx context.Context, req workflow.TurnRequest) (_ workflow.TurnResult, resultErr error) {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
 	result := workflow.TurnResult{}
@@ -326,7 +327,7 @@ func (a *Adapter) Run(ctx context.Context, req workflow.TurnRequest) (workflow.T
 	if err != nil {
 		return result, err
 	}
-	defer s.close()
+	defer func() { resultErr = errors.Join(resultErr, s.close()) }()
 	if err := s.checkRole(req.Role); err != nil {
 		return result, err
 	}

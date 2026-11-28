@@ -29,16 +29,18 @@ nstack replaces `$poteto-mode` with `$natori-mode`, `$setup-pstack` with `$setup
 
 Close Codex sessions. If the destination uses the nstack plugin, remove `nstack@nstack-local`. If the **original** setup used the old plugin, reinstall its recorded selector from the original marketplace, even when migrating to a direct install. Remove the new marketplace registration only if it was added for this migration and is unused. For a direct install, move the installed nstack skill directories out of discovery. In either case, move the new agent files and any new direct-install license files out of the way, then restore the backed-up files to their original paths. For a previously mixed install, restore the backed-up direct files as well. Reopen Codex, select the restored workflow and setup skills in the skill picker, and verify the restored model settings.
 
-## Upgrade to v0.3.0
+## From direct copies or a plugin to a managed snapshot
 
 For the historical Python release, see the [v0.3.0 instructions](v0.3.0.md). Keep prior snapshots for rollback.
 
-With the [standalone binary](../README.md#standalone-go-binary), use `nstack install --home "$config_dir" stage <new-id>` and `nstack install --home "$config_dir" activate <snapshot-id>` for activation and rollback. This uses the same state and lock as the Python reference procedure above. Role examples remain in the staged `examples/agents` directory; existing installed role TOMLs are not replaced.
+Use the [standalone binary](../README.md#standalone-go-binary) to stage and activate the new snapshot. Role examples remain in the staged `examples/agents` directory; existing installed role TOMLs are not replaced.
 
 For old direct copies, stage alongside the installation. After verifying the candidate in a disposable home, back up old skill directories by moving them out of all search paths, then activate the new snapshot. To roll back to the legacy layout, move the managed symlink out of discovery and restore the saved directories. For old plugins, preserve their source and selector, then disable them before activating direct skills. Restore their original selector for a plugin rollback.
 
 Manage agent TOMLs independently of skills. Inspect your existing `nstack_security` TOML, since v0.2.0 shipped a Daybreak assignment. Back it up before switching to the new standard example. Apply your intended custom model and effort settings separately. Restore the backup for role rollback. Check project and plugin scopes for duplicate skill and role names before activation.
 
-## From a Python-managed nstack installation to v0.4.0
+## From v0.4.0 or a Python-managed snapshot to v0.4.1
 
-Keep the same Codex home, active link, previous snapshots and customized role TOMLs. Record the active target before updating. Use `nstack install --home "$config_dir" stage <new-id>` and then `activate <new-id>`; to roll back, activate the recorded previous ID. The tools share the same snapshot store and lock. Go checks all bytes of sealed Go snapshots; older Python snapshots have no seal, so activation validates required files and skill metadata/instructions instead. Do not restage a different release under the same ID. A separate [OpenCode installation](opencode.md) does not edit the Codex home.
+Keep the same Codex home, active link, previous snapshots and customized role TOMLs. Record the active snapshot ID before updating. With the v0.4.1 binary, run `nstack install --home "$config_dir" stage <new-id>` and `nstack install --home "$config_dir" activate <new-id>`. To roll back, use the v0.4.1 binary to activate the recorded previous ID, then select the older executable separately if you also need to roll back the CLI. v0.4.0's Go installer expects files that were removed from the v0.4.1 payload, so use v0.4.1 when reactivating its own snapshot.
+
+The installers share the same store and lock. The v0.4.1 binary verifies all bytes of sealed Go snapshots. For unsealed Python-era snapshots it checks the legacy required files, permissions, and skill metadata and instructions without running the old scripts. Keep those snapshots intact and use a distinct ID for each release. For v0.4.0 OpenCode homes use the same steps with `--harness opencode` and the [separate OpenCode configuration directory](opencode.md).
